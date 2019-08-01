@@ -96,7 +96,11 @@ func (defaultFS) Link(oldname, newname string) error {
 }
 
 func (defaultFS) Open(name string) (File, error) {
-	return os.OpenFile(name, os.O_RDONLY|syscall.O_CLOEXEC, 0)
+	f, err := os.OpenFile(name, os.O_RDONLY|syscall.O_CLOEXEC, 0)
+	if err != nil {
+		return nil, err
+	}
+	return f, fadviseRandom(f)
 }
 
 func (defaultFS) OpenDir(name string) (File, error) {
