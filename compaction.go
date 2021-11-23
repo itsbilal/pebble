@@ -13,6 +13,7 @@ import (
 	"runtime/pprof"
 	"sort"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -1900,6 +1901,39 @@ func (d *DB) compact1(c *compaction, errChannel chan error) (err error) {
 	return err
 }
 
+func moveFileToSharedFS(filepath string, fs vfs.FS, sharedPath string, sharedFS vfs.FS) error {
+	file, err := fs.Open(filepath, vfs.SequentialReadsOption)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if file != nil {
+			_ = file.Close()
+		}
+	}()
+	destFile, err := sharedFS.Create(sharedPath)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		_ = destFile.Close()
+	}()
+
+	_, err = io.Copy(destFile, file)
+	if err != nil {
+		return err
+	}
+
+	if err := file.Close(); err != nil {
+		return err
+	}
+	file = nil
+	if err := fs.Remove(filepath); err != nil {
+		return err
+	}
+	return nil
+}
+
 // runCompactions runs a compaction that produces new on-disk tables from
 // memtables or old on-disk tables.
 //
@@ -2002,6 +2036,7 @@ func (d *DB) runCompaction(
 	var (
 		filenames []string
 		tw        *sstable.Writer
+		movers    sync.WaitGroup
 	)
 	defer func() {
 		if iter != nil {
@@ -2244,6 +2279,18 @@ func (d *DB) runCompaction(
 			meta.ExtendRangeKeyBounds(d.cmp, writerMeta.SmallestRangeKey, writerMeta.LargestRangeKey)
 		}
 
+		if c.outputLevel.level >= 5 && d.opts.SharedFS != nil {
+			oldFilename := base.MakeFilepath(d.opts.FS, d.dirname, fileTypeTable, meta.FileNum)
+			sharedFilename := base.MakeSharedSSTPath(d.opts.SharedFS, d.opts.SharedDir, d.opts.UniqueID, meta.FileNum)
+			movers.Add(1)
+			go func() {
+				defer movers.Done()
+				if err := moveFileToSharedFS(oldFilename, d.opts.FS, sharedFilename, d.opts.SharedFS); err == nil {
+					meta.UsesSharedFS = true
+				}
+			}()
+		}
+
 		// Verify that the sstable bounds fall within the compaction input
 		// bounds. This is a sanity check that we don't have a logic error
 		// elsewhere that causes the sstable bounds to accidentally expand past the
@@ -2400,6 +2447,7 @@ func (d *DB) runCompaction(
 			}] = f
 		}
 	}
+	movers.Wait()
 
 	if err := d.dataDir.Sync(); err != nil {
 		return nil, pendingOutputs, err
@@ -2595,15 +2643,18 @@ func (d *DB) deleteObsoleteFiles(jobID int, waitForOngoing bool) {
 
 // obsoleteFile holds information about a file that needs to be deleted soon.
 type obsoleteFile struct {
-	dir      string
-	fileNum  base.FileNum
-	fileType fileType
-	fileSize uint64
+	dir          string
+	fileNum      base.FileNum
+	fileType     fileType
+	fileSize     uint64
+	usesSharedFS bool
+	skipMetrics  bool
 }
 
 type fileInfo struct {
-	fileNum  FileNum
-	fileSize uint64
+	fileNum      FileNum
+	fileSize     uint64
+	usesSharedFS bool
 }
 
 // d.mu must be held when calling this, but the mutex may be dropped and
@@ -2633,8 +2684,9 @@ func (d *DB) doDeleteObsoleteFiles(jobID int) {
 
 	for _, table := range d.mu.versions.obsoleteTables {
 		obsoleteTables = append(obsoleteTables, fileInfo{
-			fileNum:  table.FileNum,
-			fileSize: table.Size,
+			fileNum:      table.FileNum,
+			fileSize:     table.Size,
+			usesSharedFS: table.UsesSharedFS,
 		})
 	}
 	d.mu.versions.obsoleteTables = nil
@@ -2694,10 +2746,11 @@ func (d *DB) doDeleteObsoleteFiles(jobID int) {
 			}
 
 			filesToDelete = append(filesToDelete, obsoleteFile{
-				dir:      dir,
-				fileNum:  fi.fileNum,
-				fileType: f.fileType,
-				fileSize: fi.fileSize,
+				dir:          dir,
+				fileNum:      fi.fileNum,
+				fileType:     f.fileType,
+				fileSize:     fi.fileSize,
+				usesSharedFS: fi.usesSharedFS,
 			})
 		}
 	}
@@ -2724,13 +2777,21 @@ func (d *DB) paceAndDeleteObsoleteFiles(jobID int, files []obsoleteFile) {
 	for _, of := range files {
 		path := base.MakeFilepath(d.opts.FS, of.dir, of.fileType, of.fileNum)
 		if of.fileType == fileTypeTable {
+			if of.usesSharedFS {
+				path = base.MakeSharedSSTPath(d.opts.SharedFS, d.opts.SharedDir, d.opts.UniqueID, of.fileNum)
+				if d.persistentCache != nil {
+					d.persistentCache.MarkDeleted(of.fileNum)
+				}
+			}
 			_ = pacer.maybeThrottle(of.fileSize)
-			d.mu.Lock()
-			d.mu.versions.metrics.Table.ObsoleteCount--
-			d.mu.versions.metrics.Table.ObsoleteSize -= of.fileSize
-			d.mu.Unlock()
+			if !of.skipMetrics {
+				d.mu.Lock()
+				d.mu.versions.metrics.Table.ObsoleteCount--
+				d.mu.versions.metrics.Table.ObsoleteSize -= of.fileSize
+				d.mu.Unlock()
+			}
 		}
-		d.deleteObsoleteFile(of.fileType, jobID, path, of.fileNum)
+		d.deleteObsoleteFile(of.fileType, jobID, path, of.fileNum, of.usesSharedFS)
 	}
 }
 
@@ -2759,10 +2820,14 @@ func (d *DB) maybeScheduleObsoleteTableDeletion() {
 }
 
 // deleteObsoleteFile deletes file that is no longer needed.
-func (d *DB) deleteObsoleteFile(fileType fileType, jobID int, path string, fileNum FileNum) {
+func (d *DB) deleteObsoleteFile(fileType fileType, jobID int, path string, fileNum FileNum, usesSharedFS bool) {
 	// TODO(peter): need to handle this error, probably by re-adding the
 	// file that couldn't be deleted to one of the obsolete slices map.
-	err := d.opts.Cleaner.Clean(d.opts.FS, fileType, path)
+	fs := d.opts.FS
+	if usesSharedFS {
+		fs = d.opts.SharedFS
+	}
+	err := d.opts.Cleaner.Clean(fs, fileType, path)
 	if oserror.IsNotExist(err) {
 		return
 	}

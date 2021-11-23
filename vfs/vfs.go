@@ -283,6 +283,27 @@ func Copy(fs FS, oldname, newname string) error {
 	return dst.Sync()
 }
 
+// CopyAcrossFS copies the contents of oldname to newname. If newname exists, it will
+// be overwritten.
+func CopyAcrossFS(fs FS, oldname string, newFS FS, newname string) error {
+	src, err := fs.Open(oldname)
+	if err != nil {
+		return err
+	}
+	defer src.Close()
+
+	dst, err := newFS.Create(newname)
+	if err != nil {
+		return err
+	}
+	defer dst.Close()
+
+	if _, err := io.Copy(dst, src); err != nil {
+		return err
+	}
+	return dst.Sync()
+}
+
 // LimitedCopy copies up to maxBytes from oldname to newname. If newname
 // exists, it will be overwritten.
 func LimitedCopy(fs FS, oldname, newname string, maxBytes int64) error {
