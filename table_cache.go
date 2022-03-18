@@ -867,7 +867,7 @@ func (v *tableCacheValue) load(meta *fileMetadata, c *tableCacheShard, dbOpts *t
 		extraOpts := []sstable.ReaderOption{cacheOpts, dbOpts.filterMetrics}
 		if !meta.UsesSharedFS {
 			extraOpts = append(extraOpts, sstable.FileReopenOpt{FS: dbOpts.fs, Filename: v.filename})
-		} else if dbOpts.psCache != nil {
+		} else {
 			extraOpts = append(extraOpts, sstable.PersistentCacheOpt{PsCache: dbOpts.psCache, Meta: meta})
 		}
 		v.reader, v.err = sstable.NewReader(f, dbOpts.opts, extraOpts...)

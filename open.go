@@ -336,10 +336,10 @@ func Open(dirname string, opts *Options) (db *DB, _ error) {
 		opts.UniqueID = uniqueID
 	}
 
-	if opts.SharedFS != nil {
-		d.persistentCache = newPersistentCache(opts.FS, dirname, opts.SharedFS, opts.SharedDir, opts.UniqueID)
-		d.persistentCache.Start()
-	}
+	//if opts.SharedFS != nil {
+	//	d.persistentCache = newPersistentCache(opts.FS, dirname, opts.SharedFS, opts.SharedDir, opts.UniqueID)
+	//	d.persistentCache.Start()
+	//}
 	tableCacheSize := TableCacheSize(opts.MaxOpenFiles)
 	d.tableCache = newTableCacheContainer(opts.TableCache, d.cacheID, dirname, opts.FS, opts.SharedDir, opts.SharedFS, d.persistentCache, d.opts, tableCacheSize)
 	d.newIters = d.tableCache.newIters

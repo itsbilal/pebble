@@ -2078,7 +2078,7 @@ type PersistentCacheOpt struct {
 }
 
 func (p PersistentCacheOpt) readerApply(r *Reader) {
-	r.psCache = p.PsCache
+	//r.psCache = p.PsCache
 	r.meta = p.Meta
 }
 
@@ -2300,7 +2300,11 @@ func checkChecksum(
 func (r *Reader) readBlock(
 	bh BlockHandle, transform blockTransform, raState *readaheadState,
 ) (_ cache.Handle, cacheHit bool, _ error) {
-	if h := r.opts.Cache.Get(r.cacheID, r.fileNum, bh.Offset); h.Get() != nil {
+	usesSharedFS := false
+	if r.meta != nil {
+		usesSharedFS = r.meta.UsesSharedFS
+	}
+	if h := r.opts.Cache.Get(r.cacheID, r.fileNum, bh.Offset, usesSharedFS); h.Get() != nil {
 		if raState != nil {
 			raState.recordCacheHit(int64(bh.Offset), int64(bh.Length+blockTrailerLen))
 		}
@@ -2393,7 +2397,7 @@ func (r *Reader) readBlock(
 		v = newV
 	}
 
-	h := r.opts.Cache.Set(r.cacheID, r.fileNum, bh.Offset, v)
+	h := r.opts.Cache.Set(r.cacheID, r.fileNum, bh.Offset, v, usesSharedFS)
 	if r.psCache != nil {
 		r.psCache.MaybeCache(r.meta, int64(bh.Length))
 	}
