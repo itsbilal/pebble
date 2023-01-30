@@ -139,18 +139,6 @@ type FS interface {
 	GetDiskUsage(path string) (DiskUsage, error)
 }
 
-// SharedFileHandle holds all fields required to resolve paths to shared files
-// by vfs.SharedFS. Only sstables will be referenced using this struct. It
-// should be possible to generate a SharedFileHandle out of a FileMetadata
-// that has OnSharedFS = true.
-type SharedFileHandle struct {
-	// FileNum of the sstable at creation time in the creator instance of Pebble.
-	FileNum uint64
-	// CreatorInstanceID is the instanceID of the Pebble instance that created
-	// this shared file. See opts.Experimental.InstanceID.
-	CreatorInstanceID uint64
-}
-
 // SharedFS is an FS-like file system that can contain files accessible
 // by multiple Pebble instances. SharedFS is responsible for managing
 // obsoletion of files that could be referenced by multiple Pebble instances

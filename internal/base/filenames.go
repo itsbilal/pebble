@@ -33,6 +33,7 @@ const (
 	FileTypeOptions
 	FileTypeOldTemp
 	FileTypeTemp
+	FileTypeProvider
 )
 
 // MakeFilename builds a filename from components.
@@ -54,6 +55,8 @@ func MakeFilename(fileType FileType, fileNum FileNum) string {
 		return fmt.Sprintf("CURRENT.%s.dbtmp", fileNum)
 	case FileTypeTemp:
 		return fmt.Sprintf("temporary.%s.dbtmp", fileNum)
+	case FileTypeProvider:
+		return fmt.Sprintf("PROVIDER-%s", fileNum)
 	}
 	panic("unreachable")
 }
@@ -83,6 +86,12 @@ func ParseFilename(fs vfs.FS, filename string) (fileType FileType, fileNum FileN
 			break
 		}
 		return FileTypeOptions, fileNum, ok
+	case strings.HasPrefix(filename, "PROVIDER-"):
+		fileNum, ok = parseFileNum(filename[len("PROVIDER-"):])
+		if !ok {
+			break
+		}
+		return FileTypeProvider, fileNum, ok
 	case strings.HasPrefix(filename, "CURRENT.") && strings.HasSuffix(filename, ".dbtmp"):
 		s := strings.TrimSuffix(filename[len("CURRENT."):], ".dbtmp")
 		fileNum, ok = parseFileNum(s)
