@@ -660,10 +660,10 @@ func (l *levelIter) loadFile(file *fileMetadata, dir int) loadFileReturnIndicato
 				if l.tableOpts.LowerBound != nil && l.cmp(smallestKey, l.tableOpts.LowerBound) < 0 {
 					smallestKey = append([]byte(nil), l.tableOpts.LowerBound...)
 				}
-				if l.tableOpts.UpperBound != nil && l.cmp(largestKey, l.tableOpts.UpperBound) > 0 {
+				if l.tableOpts.UpperBound != nil && (l.cmp(largestKey, l.tableOpts.UpperBound) > 0 || (l.cmp(largestKey, l.tableOpts.UpperBound) == 0 && !l.tableOpts.UpperBoundIsInclusive)) {
 					largestKey = append([]byte(nil), l.tableOpts.UpperBound...)
 					if !l.tableOpts.UpperBoundIsInclusive {
-						// As largestKey is inclusive, we must find the key < tableOpts.UpperBound.
+						// As largestKey is inclusive but the upper bound is exclusive, we must find the key < tableOpts.UpperBound.
 						iter, rangeDelIter, err := l.newIters(file, &l.tableOpts, l.internalOpts)
 						if rangeDelIter != nil {
 							rangeDelIter.Close()

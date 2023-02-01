@@ -1474,7 +1474,7 @@ func (d *DB) removeInProgressCompaction(c *compaction, rollback bool) {
 				// On success all compactions other than move-compactions transition the
 				// file into the Compacted state. Move-compacted files become eligible
 				// for compaction again and transition back to NotCompacting.
-				if c.kind != compactionKindMove || d.opts.SharedFS != nil {
+				if c.kind != compactionKindMove || (d.opts.SharedFS != nil && c.outputLevel.level >= sharedLevel && c.startLevel.level < sharedLevel) {
 					f.SetCompactionState(manifest.CompactionStateCompacted)
 				} else {
 					f.SetCompactionState(manifest.CompactionStateNotCompacting)
@@ -2207,30 +2207,11 @@ func (d *DB) compact1(c *compaction, errChannel chan error) (err error) {
 	ve, pendingOutputs, err := d.runCompaction(jobID, c)
 	rs.unrefLocked()
 
-	for _, e := range d.mu.compact.excisedSpan {
-		for _, l := range c.inputs {
-			l.files.Each(func(meta *manifest.FileMetadata) {
-				if d.cmp(e.span.Start, meta.Largest.UserKey) <= 0 && d.cmp(e.span.End, meta.Smallest.UserKey) > 0 {
-					if meta.FileNum < e.curFileNum {
-						err = errors.Newf("erroring compaction due to overlap with excised span: %s - %s", c.formatKey(e.span.Start), c.formatKey(e.span.End))
-					}
-				}
-			})
-		}
-	}
-
 	info.Duration = d.timeNow().Sub(startTime)
 	if err == nil {
 		d.mu.versions.logLock()
 		for _, l := range c.inputs {
 			l.files.Each(func(meta *manifest.FileMetadata) {
-				for _, e := range d.mu.compact.excisedSpan {
-					if d.cmp(e.span.Start, meta.Largest.UserKey) <= 0 && d.cmp(e.span.End, meta.Smallest.UserKey) > 0 {
-						if meta.FileNum < e.curFileNum {
-							err = errors.Newf("erroring compaction due to overlap with excised span: %s - %s", c.formatKey(e.span.Start), c.formatKey(e.span.End))
-						}
-					}
-				}
 				if meta.IsExcised {
 					err = errors.Newf("erroring compaction due to file %s getting excised", meta.FileNum)
 				}
@@ -2367,7 +2348,7 @@ func (d *DB) runCompaction(
 	// such a move if there is lots of overlapping grandparent data. Otherwise,
 	// the move could create a parent file that will require a very expensive
 	// merge later on.
-	if c.kind == compactionKindMove && d.opts.SharedFS == nil {
+	if c.kind == compactionKindMove && (d.opts.SharedFS == nil || (c.outputLevel.level < sharedLevel || c.startLevel.level >= sharedLevel)) {
 		iter := c.startLevel.files.Iter()
 		meta := iter.First()
 		c.metrics = map[int]*LevelMetrics{
@@ -2388,6 +2369,55 @@ func (d *DB) runCompaction(
 			},
 			NewFiles: []newFileEntry{
 				{Level: c.outputLevel.level, Meta: meta},
+			},
+		}
+		return ve, nil, nil
+	} else if c.kind == compactionKindMove && d.opts.SharedFS != nil {
+		// c.outputLevel.level == sharedLevel
+		//
+		// Inputs are from an unshared level, outputs are to a shared level. We
+		// need to generate new file nums and copy the files.
+		iter := c.startLevel.files.Iter()
+		meta := iter.First()
+		c.metrics = map[int]*LevelMetrics{
+			c.startLevel.level: {
+				NumFiles: -1,
+				Size:     -int64(meta.Size),
+			},
+			c.outputLevel.level: {
+				NumFiles:    1,
+				Size:        int64(meta.Size),
+				BytesMoved:  meta.Size,
+				TablesMoved: 1,
+			},
+		}
+		newMeta := *meta
+		newMeta.CompactionState = manifest.CompactionStateNotCompacting
+		newMeta.FileNum = d.mu.versions.getNextFileNum()
+		newMeta.PhysicalFileNum = newMeta.FileNum
+		newMeta.IsShared = true
+		setSharedSSTMetadata(&newMeta, d.opts.UniqueID)
+		d.mu.Unlock()
+		defer d.mu.Lock()
+
+		var oldFilename string
+		if meta.PhysicalFileNum != 0 {
+			oldFilename = base.MakeFilepath(d.opts.FS, d.dirname, fileTypeTable, meta.PhysicalFileNum)
+		} else {
+			oldFilename = base.MakeFilepath(d.opts.FS, d.dirname, fileTypeTable, meta.FileNum)
+		}
+		sharedFilename := base.MakeSharedSSTPath(d.opts.SharedFS, d.opts.SharedDir, newMeta.CreatorUniqueID, newMeta.PhysicalFileNum)
+		d.opts.SharedFS.MkdirAll(d.opts.SharedFS.PathDir(sharedFilename), 0755)
+		if err := vfs.CopyAcrossFS(d.opts.FS, oldFilename, d.opts.SharedFS, sharedFilename); err != nil {
+			return nil, nil, err
+		}
+
+		ve := &versionEdit{
+			DeletedFiles: map[deletedFileEntry]*fileMetadata{
+				{Level: c.startLevel.level, FileNum: meta.FileNum}: meta,
+			},
+			NewFiles: []newFileEntry{
+				{Level: c.outputLevel.level, Meta: &newMeta},
 			},
 		}
 		return ve, nil, nil

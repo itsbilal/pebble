@@ -3113,12 +3113,12 @@ func (r *Reader) readBlock(
 	}
 	file := r.file
 
-	if r.psCache != nil {
-		if val := r.psCache.Get(r.fileNum); val != nil {
-			file = val.File()
-			defer val.Unref()
-		}
-	}
+	//if r.psCache != nil {
+	//	if val := r.psCache.Get(r.fileNum); val != nil {
+	//		file = val.File()
+	//		defer val.Unref()
+	//	}
+	//}
 
 	if raState != nil {
 		if raState.sequentialFile != nil {
