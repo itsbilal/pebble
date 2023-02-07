@@ -1160,6 +1160,11 @@ func (d *DB) ingestApply(
 			sort.Slice(filesToExcise, func(i, j int) bool {
 				return d.cmp(filesToExcise[i].Smallest.UserKey, filesToExcise[j].Smallest.UserKey) < 0
 			})
+			levelMetrics := metrics[level]
+			if levelMetrics == nil {
+				levelMetrics = &LevelMetrics{}
+				metrics[level] = levelMetrics
+			}
 			for _, meta := range filesToExcise {
 				if d.cmp(meta.Largest.UserKey, exciseSpan.Start) < 0 ||
 					(d.cmp(meta.Largest.UserKey, exciseSpan.Start) == 0 && meta.Largest.IsExclusiveSentinel()) ||
@@ -1173,6 +1178,8 @@ func (d *DB) ingestApply(
 					Level:   level,
 					FileNum: meta.FileNum,
 				}] = meta
+				levelMetrics.NumFiles--
+				levelMetrics.Size -= int64(meta.Size)
 				newMeta := &fileMetadata{}
 				*newMeta = *meta
 				meta.IsExcised = true
@@ -1246,6 +1253,8 @@ func (d *DB) ingestApply(
 							Level: level,
 							Meta:  newMeta,
 						})
+						levelMetrics.NumFiles++
+						levelMetrics.Size += int64(newMeta.Size)
 					}
 					if rangeDelIter != nil {
 						if err := rangeDelIter.Close(); err != nil {
@@ -1305,6 +1314,8 @@ func (d *DB) ingestApply(
 							Level: level,
 							Meta:  newMeta2,
 						})
+						levelMetrics.NumFiles++
+						levelMetrics.Size += int64(newMeta2.Size)
 					}
 					if err := iter.Close(); err != nil {
 						return nil, err
