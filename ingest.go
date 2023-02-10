@@ -1233,8 +1233,14 @@ func (d *DB) ingestApply(
 					}
 					if found {
 						if d.cmp(newMeta.Smallest.UserKey, newMeta.Largest.UserKey) == 0 && base.InternalCompare(d.cmp, newMeta.Smallest, newMeta.Largest) > 0 {
-							newMeta.Largest.Trailer = ikey.Trailer
-							newMeta.LargestPointKey.Trailer = ikey.Trailer
+							if ikey == nil {
+								// We only have a rangedel remaining that's also shrunk to being
+								// nothing. Don't add this file.
+								found = false
+							} else {
+								newMeta.Largest.Trailer = ikey.Trailer
+								newMeta.LargestPointKey.Trailer = ikey.Trailer
+							}
 						}
 					}
 					if newMeta.HasRangeKeys {
@@ -1294,8 +1300,14 @@ func (d *DB) ingestApply(
 					}
 					if found {
 						if d.cmp(newMeta2.Smallest.UserKey, newMeta2.Largest.UserKey) == 0 && base.InternalCompare(d.cmp, newMeta2.Smallest, newMeta2.Largest) > 0 {
-							newMeta2.Smallest.Trailer = ikey.Trailer
-							newMeta2.SmallestPointKey.Trailer = ikey.Trailer
+							if ikey == nil {
+								// We only have a rangedel remaining that's also shrunk to being
+								// nothing. Don't add this file.
+								found = false
+							} else {
+								newMeta2.Smallest.Trailer = ikey.Trailer
+								newMeta2.SmallestPointKey.Trailer = ikey.Trailer
+							}
 						}
 					}
 					if newMeta2.HasRangeKeys {
