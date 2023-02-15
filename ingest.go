@@ -74,6 +74,44 @@ func ingestLoad1(
 	if err != nil {
 		return nil, err
 	}
+	if isShared {
+		meta := &fileMetadata{}
+
+		meta.FileNum = fileNum
+		meta.Size = uint64(stat.Size())
+		meta.CreationTime = time.Now().Unix()
+		var targetLevel int
+
+		meta.IsShared = true
+		meta.HasPointKeys = true
+		meta.CreatorUniqueID = smeta.CreatorUniqueID
+		meta.PhysicalFileNum = base.FileNum(smeta.PhysicalFileNum)
+		targetLevel = 5
+		seqNum := sstable.SeqNumL5PointKey
+		endSeqNum := sstable.SeqNumL5RangeDel
+		if smeta.SourceLevel == 6 {
+			targetLevel = 6
+			seqNum = sstable.SeqNumL6All
+			endSeqNum = sstable.SeqNumL6All
+		}
+		meta.Smallest.UserKey = append([]byte(nil), smeta.Smallest...)
+		meta.Smallest.SetKind(InternalKeyKindSet)
+		meta.Smallest.SetSeqNum(uint64(seqNum))
+		meta.Largest.UserKey = append([]byte(nil), smeta.Largest...)
+		meta.Largest.SetKind(InternalKeyKindSet)
+		meta.Largest.SetSeqNum(uint64(endSeqNum))
+		meta.SmallestPointKey = meta.Smallest
+		meta.LargestPointKey = meta.Largest
+		meta.FileSmallest = meta.Smallest
+		meta.FileLargest = meta.Largest
+
+		// Sanity check that the various bounds on the file were set consistently.
+		if err := meta.Validate(opts.Comparer.Compare, opts.Comparer.FormatKey); err != nil {
+			return nil, err
+		}
+
+		return &fileMetadataAndLevel{fileMetadata: meta, targetLevel: targetLevel}, nil
+	}
 
 	f, err := fs.Open(path)
 	if err != nil {
@@ -141,15 +179,6 @@ func ingestLoad1(
 	// meta.Stats here, the file will be loaded into the table cache for
 	// calculating stats before we can remove the original link.
 	maybeSetStatsFromProperties(meta, &r.Properties)
-
-	if isShared {
-		// Sanity check that the various bounds on the file were set consistently.
-		if err := meta.Validate(opts.Comparer.Compare, opts.Comparer.FormatKey); err != nil {
-			return nil, err
-		}
-
-		return &fileMetadataAndLevel{fileMetadata: meta, targetLevel: targetLevel}, nil
-	}
 
 	// XXX(chen): I think the following logic also applies to shared ssts but
 	// we must first "mount" the meta to the reader.. (this has been done above)
@@ -1206,7 +1235,7 @@ func (d *DB) ingestApply(
 				*newMeta2 = *newMeta
 				newMeta2.FileNum = d.mu.versions.getNextFileNum()
 				if d.cmp(exciseSpan.Start, newMeta.Smallest.UserKey) > 0 {
-					iter, rangeDelIter, err := d.newIters(meta, &IterOptions{LowerBound: meta.Smallest.UserKey, UpperBound: meta.Largest.UserKey, UpperBoundIsInclusive: true}, internalIterOpts{})
+					iter, rangeDelIter, err := d.newIters(meta, &IterOptions{LowerBound: meta.Smallest.UserKey, UpperBound: meta.Largest.UserKey, UpperBoundIsInclusive: true, level: manifest.Level(level)}, internalIterOpts{})
 					if err != nil {
 						return nil, err
 					}
@@ -1272,7 +1301,7 @@ func (d *DB) ingestApply(
 					}
 				}
 				if d.cmp(exciseSpan.End, newMeta2.Largest.UserKey) <= 0 {
-					iter, rangeDelIter, err := d.newIters(meta, &IterOptions{LowerBound: meta.Smallest.UserKey, UpperBound: meta.Largest.UserKey, UpperBoundIsInclusive: true}, internalIterOpts{})
+					iter, rangeDelIter, err := d.newIters(meta, &IterOptions{LowerBound: meta.Smallest.UserKey, UpperBound: meta.Largest.UserKey, UpperBoundIsInclusive: true, level: manifest.Level(level)}, internalIterOpts{})
 					if err != nil {
 						return nil, err
 					}
