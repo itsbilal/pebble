@@ -5,8 +5,12 @@
 package sstable
 
 import (
+	"bytes"
 	"context"
+	"encoding/hex"
+	"fmt"
 
+	"github.com/cockroachdb/errors"
 	"github.com/cockroachdb/pebble/internal/base"
 	"github.com/cockroachdb/pebble/internal/keyspan"
 	"github.com/cockroachdb/pebble/internal/manifest"
@@ -20,9 +24,10 @@ import (
 // INVARIANT: Any iterators created through a virtual reader will guarantee that
 // they don't expose keys outside the virtual sstable bounds.
 type VirtualReader struct {
-	vState     virtualState
-	reader     *Reader
-	Properties CommonProperties
+	vState       virtualState
+	reader       *Reader
+	Properties   CommonProperties
+	prefixChange *manifest.PrefixReplacement
 }
 
 // Lightweight virtual sstable state which can be passed to sstable iterators.
@@ -74,6 +79,8 @@ func MakeVirtualReader(
 	v.Properties.NumSizedDeletions = ceilDiv(reader.Properties.NumSizedDeletions*meta.Size, meta.FileBacking.Size)
 	v.Properties.RawPointTombstoneKeySize = ceilDiv(reader.Properties.RawPointTombstoneKeySize*meta.Size, meta.FileBacking.Size)
 	v.Properties.RawPointTombstoneValueSize = ceilDiv(reader.Properties.RawPointTombstoneValueSize*meta.Size, meta.FileBacking.Size)
+	v.prefixChange = meta.VirtualPrefix
+
 	return v
 }
 
@@ -85,8 +92,12 @@ func (v *VirtualReader) NewCompactionIter(
 	rp ReaderProvider,
 	bufferPool *BufferPool,
 ) (Iterator, error) {
-	return v.reader.newCompactionIter(
+	i, err := v.reader.newCompactionIter(
 		bytesIterated, categoryAndQoS, statsCollector, rp, &v.vState, bufferPool)
+	if err == nil && v.prefixChange != nil {
+		i = NewPrefixReplacingIterator(i, v.prefixChange.Backing, v.prefixChange.Materialized)
+	}
+	return i, err
 }
 
 // NewIterWithBlockPropertyFiltersAndContextEtc wraps
@@ -103,9 +114,13 @@ func (v *VirtualReader) NewIterWithBlockPropertyFiltersAndContextEtc(
 	statsCollector *CategoryStatsCollector,
 	rp ReaderProvider,
 ) (Iterator, error) {
-	return v.reader.newIterWithBlockPropertyFiltersAndContext(
+	i, err := v.reader.newIterWithBlockPropertyFiltersAndContext(
 		ctx, lower, upper, filterer, hideObsoletePoints, useFilterBlock, stats,
 		categoryAndQoS, statsCollector, rp, &v.vState)
+	if err == nil && v.prefixChange != nil {
+		i = NewPrefixReplacingIterator(i, v.prefixChange.Backing, v.prefixChange.Materialized)
+	}
+	return i, err
 }
 
 // ValidateBlockChecksumsOnBacking will call ValidateBlockChecksumsOnBacking on the underlying reader.
@@ -118,10 +133,15 @@ func (v *VirtualReader) ValidateBlockChecksumsOnBacking() error {
 func (v *VirtualReader) NewRawRangeDelIter() (keyspan.FragmentIterator, error) {
 	iter, err := v.reader.NewRawRangeDelIter()
 	if err != nil {
+		f
 		return nil, err
 	}
 	if iter == nil {
 		return nil, nil
+	}
+
+	if v.prefixChange != nil {
+		iter = NewPrefixReplacingFragmentIterator(iter, v.prefixChange.Backing, v.prefixChange.Materialized)
 	}
 
 	// Truncation of spans isn't allowed at a user key that also contains points
@@ -148,6 +168,10 @@ func (v *VirtualReader) NewRawRangeKeyIter() (keyspan.FragmentIterator, error) {
 	}
 	if iter == nil {
 		return nil, nil
+	}
+
+	if v.prefixChange != nil {
+		iter = NewPrefixReplacingFragmentIterator(iter, v.prefixChange.Backing, v.prefixChange.Materialized)
 	}
 
 	// Truncation of spans isn't allowed at a user key that also contains points
@@ -204,10 +228,239 @@ func (v *virtualState) constrainBounds(
 // enforcing the virtual sstable bounds.
 func (v *VirtualReader) EstimateDiskUsage(start, end []byte) (uint64, error) {
 	_, f, l := v.vState.constrainBounds(start, end, true /* endInclusive */)
+	if v.prefixChange != nil {
+		if !bytes.HasPrefix(f, v.prefixChange.Materialized) || !bytes.HasPrefix(l, v.prefixChange.Materialized) {
+			return 0, errInputPrefixMismatch
+		}
+		// TODO(dt): we could add a scratch buf to VirtualReader to avoid allocs on
+		// repeated calls to this.
+		f = append(append([]byte{}, v.prefixChange.Backing...), f[len(v.prefixChange.Materialized):]...)
+		l = append(append([]byte{}, v.prefixChange.Backing...), l[len(v.prefixChange.Materialized):]...)
+	}
+
 	return v.reader.EstimateDiskUsage(f, l)
 }
 
 // CommonProperties implements the CommonReader interface.
 func (v *VirtualReader) CommonProperties() *CommonProperties {
 	return &v.Properties
+}
+
+type prefixReplacingIterator struct {
+	src, dst  []byte
+	arg, arg2 []byte
+	res       InternalKey
+	err       error
+	i         Iterator
+}
+
+var errInputPrefixMismatch = errors.New("key argument does not have prefix required for replacement")
+var errOutputPrefixMismatch = errors.New("key returned does not have prefix required for replacement")
+
+var _ Iterator = (*prefixReplacingIterator)(nil)
+
+// NewPrefixReplacingIterator wraps an iterator over keys that have prefix `src`
+// in an iterator that will make them appear to have prefix `dst`. Every key
+// passed as an argument to methods on this iterator must have prefix `dst`, and
+// every key produced by the underlying iterator must have prefix `src`.
+func NewPrefixReplacingIterator(i Iterator, src, dst []byte) Iterator {
+	return &prefixReplacingIterator{
+		i:   i,
+		src: src, dst: dst,
+		arg: append([]byte{}, src...), arg2: append([]byte{}, src...),
+		res: InternalKey{UserKey: append([]byte{}, dst...)},
+	}
+}
+
+func (p *prefixReplacingIterator) rewriteArg(key []byte) []byte {
+	if !bytes.HasPrefix(key, p.dst) {
+		p.err = errInputPrefixMismatch
+		return key
+	}
+	p.arg = append(p.arg[:len(p.src)], key[len(p.dst):]...)
+	return p.arg
+}
+
+func (p *prefixReplacingIterator) rewriteArg2(key []byte) []byte {
+	if !bytes.HasPrefix(key, p.dst) {
+		p.err = errInputPrefixMismatch
+		return key
+	}
+	p.arg2 = append(p.arg2[:len(p.src)], key[len(p.dst):]...)
+	return p.arg2
+}
+
+func (p *prefixReplacingIterator) rewriteResult(
+	k *InternalKey, v base.LazyValue,
+) (*InternalKey, base.LazyValue) {
+	if !bytes.HasPrefix(k.UserKey, p.src) {
+		p.err = errOutputPrefixMismatch
+		return k, v
+	}
+	p.res.Trailer = k.Trailer
+	p.res.UserKey = append(p.res.UserKey[:len(p.dst)], k.UserKey[len(p.src):]...)
+	return &p.res, v
+}
+
+// SeekGE implements the Iterator interface.
+func (p *prefixReplacingIterator) SeekGE(
+	key []byte, flags base.SeekGEFlags,
+) (*InternalKey, base.LazyValue) {
+	return p.rewriteResult(p.i.SeekGE(p.rewriteArg(key), flags))
+}
+
+// SeekPrefixGE implements the Iterator interface.
+func (p *prefixReplacingIterator) SeekPrefixGE(
+	prefix, key []byte, flags base.SeekGEFlags,
+) (*InternalKey, base.LazyValue) {
+	return p.rewriteResult(p.i.SeekPrefixGE(p.rewriteArg2(prefix), p.rewriteArg(key), flags))
+}
+
+// SeekLT implements the Iterator interface.
+func (p *prefixReplacingIterator) SeekLT(
+	key []byte, flags base.SeekLTFlags,
+) (*InternalKey, base.LazyValue) {
+	return p.rewriteResult(p.i.SeekLT(p.rewriteArg(key), flags))
+}
+
+// First implements the Iterator interface.
+func (p *prefixReplacingIterator) First() (*InternalKey, base.LazyValue) {
+	return p.rewriteResult(p.i.First())
+}
+
+// Last implements the Iterator interface.
+func (p *prefixReplacingIterator) Last() (*InternalKey, base.LazyValue) {
+	return p.rewriteResult(p.i.Last())
+}
+
+// Next implements the Iterator interface.
+func (p *prefixReplacingIterator) Next() (*InternalKey, base.LazyValue) {
+	return p.rewriteResult(p.i.Next())
+}
+
+// NextPrefix implements the Iterator interface.
+func (p *prefixReplacingIterator) NextPrefix(succKey []byte) (*InternalKey, base.LazyValue) {
+	return p.rewriteResult(p.i.NextPrefix(p.rewriteArg(succKey)))
+}
+
+// Prev implements the Iterator interface.
+func (p *prefixReplacingIterator) Prev() (*InternalKey, base.LazyValue) {
+	return p.rewriteResult(p.i.Prev())
+}
+
+// Error implements the Iterator interface.
+func (p *prefixReplacingIterator) Error() error {
+	if p.err != nil {
+		return p.err
+	}
+	return p.i.Error()
+}
+
+// Close implements the Iterator interface.
+func (p *prefixReplacingIterator) Close() error {
+	return p.i.Close()
+}
+
+// SetBounds implements the Iterator interface.
+func (p *prefixReplacingIterator) SetBounds(lower, upper []byte) {
+	p.i.SetBounds(p.rewriteArg(lower), p.rewriteArg2(upper))
+}
+
+func (p *prefixReplacingIterator) MaybeFilteredKeys() bool {
+	return p.i.MaybeFilteredKeys()
+}
+
+// String implements the Iterator interface.
+func (p *prefixReplacingIterator) String() string {
+	return fmt.Sprintf("%s [%s->%s]", p.i.String(), hex.EncodeToString(p.src), hex.EncodeToString(p.dst))
+}
+
+func (p *prefixReplacingIterator) SetCloseHook(fn func(i Iterator) error) {
+	p.i.SetCloseHook(fn)
+}
+
+type prefixReplacingFragmentIterator struct {
+	i          keyspan.FragmentIterator
+	err        error
+	src, dst   []byte
+	arg        []byte
+	out1, out2 []byte
+}
+
+// NewPrefixReplacingFragmentIterator wraps a FragmentIterator over some reader
+// that contains range keys in some key span to make those range keys appear to
+// be remapped into some other key-span.
+func NewPrefixReplacingFragmentIterator(
+	i keyspan.FragmentIterator, src, dst []byte,
+) keyspan.FragmentIterator {
+	return &prefixReplacingFragmentIterator{
+		i:   i,
+		src: src, dst: dst,
+		arg: append([]byte{}, src...),
+	}
+}
+
+func (p *prefixReplacingFragmentIterator) rewriteArg(key []byte) []byte {
+	if !bytes.HasPrefix(key, p.dst) {
+		p.err = errInputPrefixMismatch
+		return key
+	}
+	p.arg = append(p.arg[:len(p.src)], key[len(p.dst):]...)
+	return p.arg
+}
+
+func (p *prefixReplacingFragmentIterator) rewriteSpan(sp *keyspan.Span) *keyspan.Span {
+	if !bytes.HasPrefix(sp.Start, p.dst) || !bytes.HasPrefix(sp.End, p.dst) {
+		p.err = errInputPrefixMismatch
+		return sp
+	}
+	sp.Start = append(p.out1[:len(p.dst)], sp.Start[len(p.src):]...)
+	sp.End = append(p.out2[:len(p.dst)], sp.End[len(p.src):]...)
+
+	// TODO(dt): RESOLVE DURING CODE REVIEW
+	// do I need to touch sp.Keys? is sp.Start/End actually assured to both have dst prefix?
+	return sp
+}
+
+// SeekGE implements the FragmentIterator interface.
+func (p *prefixReplacingFragmentIterator) SeekGE(key []byte) *keyspan.Span {
+	return p.rewriteSpan(p.i.SeekGE(p.rewriteArg(key)))
+}
+
+// SeekLT implements the FragmentIterator interface.
+func (p *prefixReplacingFragmentIterator) SeekLT(key []byte) *keyspan.Span {
+	return p.rewriteSpan(p.i.SeekLT(p.rewriteArg(key)))
+}
+
+// First implements the FragmentIterator interface.
+func (p *prefixReplacingFragmentIterator) First() *keyspan.Span {
+	return p.rewriteSpan(p.i.First())
+}
+
+// Last implements the FragmentIterator interface.
+func (p *prefixReplacingFragmentIterator) Last() *keyspan.Span {
+	return p.rewriteSpan(p.i.Last())
+}
+
+// Close implements the FragmentIterator interface.
+func (p *prefixReplacingFragmentIterator) Next() *keyspan.Span {
+	return p.rewriteSpan(p.i.Next())
+}
+
+// Prev implements the FragmentIterator interface.
+func (p *prefixReplacingFragmentIterator) Prev() *keyspan.Span {
+	return p.rewriteSpan(p.i.Prev())
+}
+
+// Error implements the FragmentIterator interface.
+func (p *prefixReplacingFragmentIterator) Error() error {
+	if p.err != nil {
+		return p.err
+	}
+	return p.i.Error()
+}
+
+// Close implements the FragmentIterator interface.
+func (p *prefixReplacingFragmentIterator) Close() error {
+	return p.i.Close()
 }

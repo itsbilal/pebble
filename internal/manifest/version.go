@@ -269,6 +269,15 @@ type FileMetadata struct {
 	boundTypeSmallest, boundTypeLargest boundType
 	// Virtual is true if the FileMetadata belongs to a virtual sstable.
 	Virtual bool
+
+	// VirtualPrefix is used for virtual files where the backing file has a
+	// different prefix on its keys than the span in which it is being exposed.
+	VirtualPrefix *PrefixReplacement
+}
+
+// PrefixReplacement represents a read-time replacement of a key prefix.
+type PrefixReplacement struct {
+	Backing, Materialized []byte
 }
 
 // PhysicalFileMeta is used by functions which want a guarantee that their input
