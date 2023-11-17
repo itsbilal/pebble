@@ -24,19 +24,19 @@ import (
 // INVARIANT: Any iterators created through a virtual reader will guarantee that
 // they don't expose keys outside the virtual sstable bounds.
 type VirtualReader struct {
-	vState       virtualState
-	reader       *Reader
-	Properties   CommonProperties
-	prefixChange *manifest.PrefixReplacement
+	vState     virtualState
+	reader     *Reader
+	Properties CommonProperties
 }
 
 // Lightweight virtual sstable state which can be passed to sstable iterators.
 type virtualState struct {
-	lower     InternalKey
-	upper     InternalKey
-	fileNum   base.FileNum
-	Compare   Compare
-	isForeign bool
+	lower        InternalKey
+	upper        InternalKey
+	fileNum      base.FileNum
+	Compare      Compare
+	isForeign    bool
+	prefixChange *manifest.PrefixReplacement
 }
 
 func ceilDiv(a, b uint64) uint64 {
@@ -53,11 +53,12 @@ func MakeVirtualReader(
 	}
 
 	vState := virtualState{
-		lower:     meta.Smallest,
-		upper:     meta.Largest,
-		fileNum:   meta.FileNum,
-		Compare:   reader.Compare,
-		isForeign: isForeign,
+		lower:        meta.Smallest,
+		upper:        meta.Largest,
+		fileNum:      meta.FileNum,
+		Compare:      reader.Compare,
+		isForeign:    isForeign,
+		prefixChange: meta.PrefixReplacement,
 	}
 	v := VirtualReader{
 		vState: vState,
@@ -79,7 +80,6 @@ func MakeVirtualReader(
 	v.Properties.NumSizedDeletions = ceilDiv(reader.Properties.NumSizedDeletions*meta.Size, meta.FileBacking.Size)
 	v.Properties.RawPointTombstoneKeySize = ceilDiv(reader.Properties.RawPointTombstoneKeySize*meta.Size, meta.FileBacking.Size)
 	v.Properties.RawPointTombstoneValueSize = ceilDiv(reader.Properties.RawPointTombstoneValueSize*meta.Size, meta.FileBacking.Size)
-	v.prefixChange = meta.VirtualPrefix
 
 	return v
 }
@@ -94,8 +94,8 @@ func (v *VirtualReader) NewCompactionIter(
 ) (Iterator, error) {
 	i, err := v.reader.newCompactionIter(
 		bytesIterated, categoryAndQoS, statsCollector, rp, &v.vState, bufferPool)
-	if err == nil && v.prefixChange != nil {
-		i = NewPrefixReplacingIterator(i, v.prefixChange.Backing, v.prefixChange.Materialized)
+	if err == nil && v.vState.prefixChange != nil {
+		i = NewPrefixReplacingIterator(i, v.vState.prefixChange.Backing, v.vState.prefixChange.Materialized, v.reader.Compare)
 	}
 	return i, err
 }
@@ -117,8 +117,8 @@ func (v *VirtualReader) NewIterWithBlockPropertyFiltersAndContextEtc(
 	i, err := v.reader.newIterWithBlockPropertyFiltersAndContext(
 		ctx, lower, upper, filterer, hideObsoletePoints, useFilterBlock, stats,
 		categoryAndQoS, statsCollector, rp, &v.vState)
-	if err == nil && v.prefixChange != nil {
-		i = NewPrefixReplacingIterator(i, v.prefixChange.Backing, v.prefixChange.Materialized)
+	if err == nil && v.vState.prefixChange != nil {
+		i = NewPrefixReplacingIterator(i, v.vState.prefixChange.Backing, v.vState.prefixChange.Materialized, v.reader.Compare)
 	}
 	return i, err
 }
@@ -133,15 +133,23 @@ func (v *VirtualReader) ValidateBlockChecksumsOnBacking() error {
 func (v *VirtualReader) NewRawRangeDelIter() (keyspan.FragmentIterator, error) {
 	iter, err := v.reader.NewRawRangeDelIter()
 	if err != nil {
-		f
 		return nil, err
 	}
 	if iter == nil {
 		return nil, nil
 	}
+	lower := &v.vState.lower
+	upper := &v.vState.upper
 
-	if v.prefixChange != nil {
-		iter = NewPrefixReplacingFragmentIterator(iter, v.prefixChange.Backing, v.prefixChange.Materialized)
+	if v.vState.prefixChange != nil {
+		lower = &InternalKey{UserKey: v.vState.prefixChange.ReplaceArg(lower.UserKey), Trailer: lower.Trailer}
+		upper = &InternalKey{UserKey: v.vState.prefixChange.ReplaceArg(upper.UserKey), Trailer: upper.Trailer}
+
+		iter = keyspan.Truncate(
+			v.reader.Compare, iter, lower.UserKey, upper.UserKey,
+			lower, upper, !v.vState.upper.IsExclusiveSentinel(), /* panicOnUpperTruncate */
+		)
+		return NewPrefixReplacingFragmentIterator(iter, v.vState.prefixChange.Backing, v.vState.prefixChange.Materialized), nil
 	}
 
 	// Truncation of spans isn't allowed at a user key that also contains points
@@ -155,8 +163,8 @@ func (v *VirtualReader) NewRawRangeDelIter() (keyspan.FragmentIterator, error) {
 	// includes both point keys), but not [a#2,SET-b#3,SET] (as it would truncate
 	// the rangedel at b and lead to the point being uncovered).
 	return keyspan.Truncate(
-		v.reader.Compare, iter, v.vState.lower.UserKey, v.vState.upper.UserKey,
-		&v.vState.lower, &v.vState.upper, !v.vState.upper.IsExclusiveSentinel(), /* panicOnUpperTruncate */
+		v.reader.Compare, iter, lower.UserKey, upper.UserKey,
+		lower, upper, !v.vState.upper.IsExclusiveSentinel(), /* panicOnUpperTruncate */
 	), nil
 }
 
@@ -169,9 +177,17 @@ func (v *VirtualReader) NewRawRangeKeyIter() (keyspan.FragmentIterator, error) {
 	if iter == nil {
 		return nil, nil
 	}
+	lower := &v.vState.lower
+	upper := &v.vState.upper
 
-	if v.prefixChange != nil {
-		iter = NewPrefixReplacingFragmentIterator(iter, v.prefixChange.Backing, v.prefixChange.Materialized)
+	if v.vState.prefixChange != nil {
+		lower = &InternalKey{UserKey: v.vState.prefixChange.ReplaceArg(lower.UserKey), Trailer: lower.Trailer}
+		upper = &InternalKey{UserKey: v.vState.prefixChange.ReplaceArg(upper.UserKey), Trailer: upper.Trailer}
+		iter = keyspan.Truncate(
+			v.reader.Compare, iter, lower.UserKey, upper.UserKey,
+			lower, upper, !v.vState.upper.IsExclusiveSentinel(), /* panicOnUpperTruncate */
+		)
+		return NewPrefixReplacingFragmentIterator(iter, v.vState.prefixChange.Backing, v.vState.prefixChange.Materialized), nil
 	}
 
 	// Truncation of spans isn't allowed at a user key that also contains points
@@ -185,8 +201,8 @@ func (v *VirtualReader) NewRawRangeKeyIter() (keyspan.FragmentIterator, error) {
 	// includes both point keys), but not [a#2,SET-b#3,SET] (as it would truncate
 	// the range key at b and lead to the point being uncovered).
 	return keyspan.Truncate(
-		v.reader.Compare, iter, v.vState.lower.UserKey, v.vState.upper.UserKey,
-		&v.vState.lower, &v.vState.upper, !v.vState.upper.IsExclusiveSentinel(), /* panicOnUpperTruncate */
+		v.reader.Compare, iter, lower.UserKey, upper.UserKey,
+		lower, upper, !v.vState.upper.IsExclusiveSentinel(), /* panicOnUpperTruncate */
 	), nil
 }
 
@@ -219,6 +235,10 @@ func (v *virtualState) constrainBounds(
 			last = end
 		}
 	}
+	if v.prefixChange != nil {
+		first = v.prefixChange.ReplaceArg(first)
+		last = v.prefixChange.ReplaceArg(last)
+	}
 	// TODO(bananabrick): What if someone passes in bounds completely outside of
 	// virtual sstable bounds?
 	return lastKeyInclusive, first, last
@@ -228,14 +248,14 @@ func (v *virtualState) constrainBounds(
 // enforcing the virtual sstable bounds.
 func (v *VirtualReader) EstimateDiskUsage(start, end []byte) (uint64, error) {
 	_, f, l := v.vState.constrainBounds(start, end, true /* endInclusive */)
-	if v.prefixChange != nil {
-		if !bytes.HasPrefix(f, v.prefixChange.Materialized) || !bytes.HasPrefix(l, v.prefixChange.Materialized) {
+	if v.vState.prefixChange != nil {
+		if !bytes.HasPrefix(f, v.vState.prefixChange.Materialized) || !bytes.HasPrefix(l, v.vState.prefixChange.Materialized) {
 			return 0, errInputPrefixMismatch
 		}
 		// TODO(dt): we could add a scratch buf to VirtualReader to avoid allocs on
 		// repeated calls to this.
-		f = append(append([]byte{}, v.prefixChange.Backing...), f[len(v.prefixChange.Materialized):]...)
-		l = append(append([]byte{}, v.prefixChange.Backing...), l[len(v.prefixChange.Materialized):]...)
+		f = append(append([]byte{}, v.vState.prefixChange.Backing...), f[len(v.vState.prefixChange.Materialized):]...)
+		l = append(append([]byte{}, v.vState.prefixChange.Backing...), l[len(v.vState.prefixChange.Materialized):]...)
 	}
 
 	return v.reader.EstimateDiskUsage(f, l)
@@ -247,11 +267,12 @@ func (v *VirtualReader) CommonProperties() *CommonProperties {
 }
 
 type prefixReplacingIterator struct {
+	i         Iterator
+	cmp       base.Compare
 	src, dst  []byte
 	arg, arg2 []byte
 	res       InternalKey
 	err       error
-	i         Iterator
 }
 
 var errInputPrefixMismatch = errors.New("key argument does not have prefix required for replacement")
@@ -263,13 +284,18 @@ var _ Iterator = (*prefixReplacingIterator)(nil)
 // in an iterator that will make them appear to have prefix `dst`. Every key
 // passed as an argument to methods on this iterator must have prefix `dst`, and
 // every key produced by the underlying iterator must have prefix `src`.
-func NewPrefixReplacingIterator(i Iterator, src, dst []byte) Iterator {
+func NewPrefixReplacingIterator(i Iterator, src, dst []byte, cmp base.Compare) Iterator {
 	return &prefixReplacingIterator{
 		i:   i,
+		cmp: cmp,
 		src: src, dst: dst,
 		arg: append([]byte{}, src...), arg2: append([]byte{}, src...),
 		res: InternalKey{UserKey: append([]byte{}, dst...)},
 	}
+}
+
+func (p *prefixReplacingIterator) SetContext(ctx context.Context) {
+	p.i.SetContext(ctx)
 }
 
 func (p *prefixReplacingIterator) rewriteArg(key []byte) []byte {
@@ -293,9 +319,11 @@ func (p *prefixReplacingIterator) rewriteArg2(key []byte) []byte {
 func (p *prefixReplacingIterator) rewriteResult(
 	k *InternalKey, v base.LazyValue,
 ) (*InternalKey, base.LazyValue) {
-	if !bytes.HasPrefix(k.UserKey, p.src) {
-		p.err = errOutputPrefixMismatch
+	if k == nil {
 		return k, v
+	}
+	if !bytes.HasPrefix(k.UserKey, p.src) {
+		panic(errOutputPrefixMismatch)
 	}
 	p.res.Trailer = k.Trailer
 	p.res.UserKey = append(p.res.UserKey[:len(p.dst)], k.UserKey[len(p.src):]...)
@@ -306,6 +334,10 @@ func (p *prefixReplacingIterator) rewriteResult(
 func (p *prefixReplacingIterator) SeekGE(
 	key []byte, flags base.SeekGEFlags,
 ) (*InternalKey, base.LazyValue) {
+	cmp := p.cmp(key, p.dst)
+	if cmp > 0 {
+		return p.rewriteResult(p.i.SeekGE(p.src, flags))
+	}
 	return p.rewriteResult(p.i.SeekGE(p.rewriteArg(key), flags))
 }
 
@@ -313,6 +345,11 @@ func (p *prefixReplacingIterator) SeekGE(
 func (p *prefixReplacingIterator) SeekPrefixGE(
 	prefix, key []byte, flags base.SeekGEFlags,
 ) (*InternalKey, base.LazyValue) {
+	cmp := p.cmp(key, p.dst)
+	if cmp < 0 {
+		// Prefix mismatch by definition.
+		return nil, base.LazyValue{}
+	}
 	return p.rewriteResult(p.i.SeekPrefixGE(p.rewriteArg2(prefix), p.rewriteArg(key), flags))
 }
 
@@ -320,6 +357,12 @@ func (p *prefixReplacingIterator) SeekPrefixGE(
 func (p *prefixReplacingIterator) SeekLT(
 	key []byte, flags base.SeekLTFlags,
 ) (*InternalKey, base.LazyValue) {
+	cmp := p.cmp(key, p.dst)
+	if cmp < 0 {
+		// Exhaust the iterator by Prev()ing before the First key.
+		p.i.First()
+		return p.rewriteResult(p.i.Prev())
+	}
 	return p.rewriteResult(p.i.SeekLT(p.rewriteArg(key), flags))
 }
 
@@ -363,7 +406,7 @@ func (p *prefixReplacingIterator) Close() error {
 
 // SetBounds implements the Iterator interface.
 func (p *prefixReplacingIterator) SetBounds(lower, upper []byte) {
-	p.i.SetBounds(p.rewriteArg(lower), p.rewriteArg2(upper))
+	p.i.SetBounds(lower, upper)
 }
 
 func (p *prefixReplacingIterator) MaybeFilteredKeys() bool {
@@ -396,7 +439,9 @@ func NewPrefixReplacingFragmentIterator(
 	return &prefixReplacingFragmentIterator{
 		i:   i,
 		src: src, dst: dst,
-		arg: append([]byte{}, src...),
+		arg:  append([]byte{}, src...),
+		out1: append([]byte(nil), dst...),
+		out2: append([]byte(nil), dst...),
 	}
 }
 
@@ -410,7 +455,7 @@ func (p *prefixReplacingFragmentIterator) rewriteArg(key []byte) []byte {
 }
 
 func (p *prefixReplacingFragmentIterator) rewriteSpan(sp *keyspan.Span) *keyspan.Span {
-	if !bytes.HasPrefix(sp.Start, p.dst) || !bytes.HasPrefix(sp.End, p.dst) {
+	if !bytes.HasPrefix(sp.Start, p.src) || !bytes.HasPrefix(sp.End, p.src) {
 		p.err = errInputPrefixMismatch
 		return sp
 	}

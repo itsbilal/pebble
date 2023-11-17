@@ -270,14 +270,32 @@ type FileMetadata struct {
 	// Virtual is true if the FileMetadata belongs to a virtual sstable.
 	Virtual bool
 
-	// VirtualPrefix is used for virtual files where the backing file has a
+	// PrefixReplacement is used for virtual files where the backing file has a
 	// different prefix on its keys than the span in which it is being exposed.
-	VirtualPrefix *PrefixReplacement
+	PrefixReplacement *PrefixReplacement
 }
 
 // PrefixReplacement represents a read-time replacement of a key prefix.
 type PrefixReplacement struct {
 	Backing, Materialized []byte
+}
+
+func (p *PrefixReplacement) ReplaceArg(src []byte) []byte {
+	return p.replace(src, p.Materialized, p.Backing)
+}
+
+func (p *PrefixReplacement) ReplaceResult(key []byte) []byte {
+	return p.replace(key, p.Backing, p.Materialized)
+}
+
+func (p *PrefixReplacement) replace(key, from, to []byte) []byte {
+	if !bytes.HasPrefix(key, from) {
+		panic(fmt.Sprintf("unexpected prefix in replace: %s", key))
+	}
+	result := make([]byte, 0, len(to)+(len(key)-len(from)))
+	result = append(result, to...)
+	result = append(result, key[len(from):]...)
+	return result
 }
 
 // PhysicalFileMeta is used by functions which want a guarantee that their input
@@ -858,6 +876,18 @@ func (m *FileMetadata) Validate(cmp Compare, formatKey base.FormatKey) error {
 	// Ensure that FileMetadata.Init was called.
 	if m.FileBacking == nil {
 		return base.CorruptionErrorf("file metadata FileBacking not set")
+	}
+
+	if m.PrefixReplacement != nil {
+		if !m.Virtual {
+			return base.CorruptionErrorf("prefix replacement rule set with non-virtual file")
+		}
+		if !bytes.HasPrefix(m.Smallest.UserKey, m.PrefixReplacement.Materialized) {
+			return base.CorruptionErrorf("virtual file with prefix replacement rules has smallest key with a different prefix: %s", m.Smallest.Pretty(formatKey))
+		}
+		if !bytes.HasPrefix(m.Largest.UserKey, m.PrefixReplacement.Materialized) {
+			return base.CorruptionErrorf("virtual file with prefix replacement rules has largest key with a different prefix: %s", m.Largest.Pretty(formatKey))
+		}
 	}
 
 	return nil
