@@ -6,6 +6,7 @@ package sstable
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/cockroachdb/errors"
 	"github.com/cockroachdb/pebble/internal/base"
@@ -146,6 +147,11 @@ func CopySpan(
 	// the empty virtual span would still be a problem, so don't bother.
 	if len(blocks) < 1 {
 		return 0, ErrEmptySpan
+	}
+	if len(blocks) == int(r.Properties.NumDataBlocks) {
+		fmt.Printf("downloading entire sstable (%d blocks)\n", len(blocks))
+	} else {
+		fmt.Printf("downloading partial sstable (%d of %d blocks)\n", len(blocks), r.Properties.NumDataBlocks)
 	}
 
 	// Find the span of the input file that contains all our blocks, and then copy
