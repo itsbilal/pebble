@@ -12,6 +12,7 @@ import (
 	"github.com/cockroachdb/pebble/internal/bytealloc"
 	"github.com/cockroachdb/pebble/objstorage"
 	"github.com/golang/snappy"
+	"github.com/klauspost/compress/s2"
 )
 
 // Compression is the per-block compression algorithm to use.
@@ -23,6 +24,7 @@ const (
 	NoCompression
 	SnappyCompression
 	ZstdCompression
+	S2Compression
 	NCompression
 )
 
@@ -36,6 +38,8 @@ func (c Compression) String() string {
 		return "NoCompression"
 	case SnappyCompression:
 		return "Snappy"
+	case S2Compression:
+		return "S2"
 	case ZstdCompression:
 		return "ZSTD"
 	default:
@@ -55,6 +59,8 @@ func CompressionFromString(s string) Compression {
 		return SnappyCompression
 	case "ZSTD":
 		return ZstdCompression
+	case "S2":
+		return S2Compression
 	default:
 		return DefaultCompression
 	}
@@ -82,6 +88,7 @@ const (
 	Lz4hcCompressionIndicator  CompressionIndicator = 5
 	XpressCompressionIndicator CompressionIndicator = 6
 	ZstdCompressionIndicator   CompressionIndicator = 7
+	S2CompressionIndicator     CompressionIndicator = 8
 )
 
 // String implements fmt.Stringer.
@@ -103,6 +110,8 @@ func (i CompressionIndicator) String() string {
 		return "xpress"
 	case 7:
 		return "zstd"
+	case 8:
+		return "s2"
 	default:
 		panic(errors.Newf("sstable: unknown block type: %d", i))
 	}
@@ -121,6 +130,9 @@ func DecompressedLen(
 		return 0, 0, nil
 	case SnappyCompressionIndicator:
 		l, err := snappy.DecodedLen(b)
+		return l, 0, err
+	case S2CompressionIndicator:
+		l, err := s2.DecodedLen(b)
 		return l, 0, err
 	case ZstdCompressionIndicator:
 		// This will also be used by zlib, bzip2 and lz4 to retrieve the decodedLen
@@ -146,6 +158,8 @@ func DecompressInto(algo CompressionIndicator, compressed []byte, buf []byte) er
 		result, err = snappy.Decode(buf, compressed)
 	case ZstdCompressionIndicator:
 		result, err = decodeZstd(buf, compressed)
+	case S2CompressionIndicator:
+		result, err = s2.Decode(buf, compressed)
 	default:
 		return base.CorruptionErrorf("pebble/table: unknown block compression: %d", errors.Safe(algo))
 	}
@@ -248,6 +262,8 @@ func compress(
 	switch compression {
 	case SnappyCompression:
 		return SnappyCompressionIndicator, snappy.Encode(dstBuf, b)
+	case S2Compression:
+		return S2CompressionIndicator, s2.Encode(dstBuf, b)
 	case NoCompression:
 		return NoCompressionIndicator, b
 	case ZstdCompression:

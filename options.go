@@ -44,6 +44,7 @@ const (
 	NoCompression      = block.NoCompression
 	SnappyCompression  = block.SnappyCompression
 	ZstdCompression    = block.ZstdCompression
+	S2Compression      = block.S2Compression
 )
 
 // FilterType exports the base.FilterType type.
@@ -1866,6 +1867,8 @@ func (o *Options) Parse(s string, hooks *ParseHooks) error {
 					l.Compression = func() Compression { return NoCompression }
 				case "Snappy":
 					l.Compression = func() Compression { return SnappyCompression }
+				case "S2":
+					l.Compression = func() Compression { return S2Compression }
 				case "ZSTD":
 					l.Compression = func() Compression { return ZstdCompression }
 				default:
