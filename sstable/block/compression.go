@@ -25,6 +25,7 @@ const (
 	SnappyCompression
 	ZstdCompression
 	S2Compression
+	AdaptiveCompression
 	NCompression
 )
 
@@ -42,6 +43,8 @@ func (c Compression) String() string {
 		return "S2"
 	case ZstdCompression:
 		return "ZSTD"
+	case AdaptiveCompression:
+		return "Adaptive"
 	default:
 		return "Unknown"
 	}
@@ -61,6 +64,8 @@ func CompressionFromString(s string) Compression {
 		return ZstdCompression
 	case "S2":
 		return S2Compression
+	case "Adaptive":
+		return AdaptiveCompression
 	default:
 		return DefaultCompression
 	}
@@ -234,6 +239,12 @@ func CompressAndChecksum(
 	// Compress the buffer, discarding the result if the improvement isn't at
 	// least 12.5%.
 	algo := NoCompressionIndicator
+	if compression == AdaptiveCompression {
+		// Adaptive compression is usually resolved by the caller of this
+		// method to some other type. If that hasn't happened yet, use the
+		// default compression.
+		compression = SnappyCompression
+	}
 	if compression != NoCompression {
 		var compressed []byte
 		algo, compressed = compress(compression, block, *dst)

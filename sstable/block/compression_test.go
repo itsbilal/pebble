@@ -23,6 +23,11 @@ func TestCompressionRoundtrip(t *testing.T) {
 	rng := rand.New(rand.NewSource(seed))
 
 	for compression := DefaultCompression + 1; compression < NCompression; compression++ {
+		if compression == AdaptiveCompression {
+			// Skip; adaptive is always resolved to something else before calling
+			// compress.
+			continue
+		}
 		t.Run(compression.String(), func(t *testing.T) {
 			payload := make([]byte, rng.Intn(10<<10 /* 10 KiB */))
 			rng.Read(payload)

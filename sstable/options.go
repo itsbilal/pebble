@@ -214,6 +214,10 @@ type WriterOptions struct {
 	// youngest for a userkey.
 	WritingToLowestLevel bool
 
+	// Level is the LSM level to which this sstable is being written. Zero value
+	// could mean either L0 or an ambiguous level.
+	Level int
+
 	// BlockPropertyCollectors is a list of BlockPropertyCollector creation
 	// functions. A new BlockPropertyCollector is created for each sstable
 	// built and lives for the lifetime of writing that table.

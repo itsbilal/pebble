@@ -9,6 +9,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"math"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -322,6 +323,8 @@ type DB struct {
 	// We want to wait for those goroutines to finish, before closing the DB.
 	// compactionShedulers.Wait() should not be called while the DB.mu is held.
 	compactionSchedulers sync.WaitGroup
+
+	adaptiveCompression *sstable.StatefulAdaptiveCompressionResolver
 
 	// The main mutex protecting internal DB state. This mutex encompasses many
 	// fields because those fields need to be accessed and updated atomically. In
@@ -3018,4 +3021,62 @@ func (d *DB) DebugCurrentVersion() *manifest.Version {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return d.mu.versions.currentVersion()
+}
+
+func (d *DB) updateAdaptiveCompressionStats() {
+	d.mu.Lock()
+	if d.closed.Load() != nil {
+		d.mu.Unlock()
+		return
+	}
+	vers := d.mu.versions.currentVersion()
+	vers.Ref()
+	d.mu.Unlock()
+	defer vers.Unref()
+
+	ages := make([]float64, 0)
+	startKeys := make([][]byte, 0)
+	oldestFileNum := base.DiskFileNum(math.MaxUint64)
+	newestFileNum := base.DiskFileNum(0)
+	for i := range vers.Levels {
+		if i == 0 {
+			continue
+		}
+		iter := vers.Levels[i].Iter()
+		for f := iter.First(); f != nil; f = iter.Next() {
+			if oldestFileNum > f.FileBacking.DiskFileNum {
+				oldestFileNum = f.FileBacking.DiskFileNum
+			}
+			if newestFileNum < f.FileBacking.DiskFileNum {
+				newestFileNum = f.FileBacking.DiskFileNum
+			}
+		}
+	}
+	for i := range vers.Levels {
+		ages = ages[:0]
+		startKeys = startKeys[:0]
+		if i == 0 {
+			continue
+		}
+		iter := vers.Levels[i].Iter()
+		for f := iter.First(); f != nil; f = iter.Next() {
+			startKeys = append(startKeys, f.Smallest.UserKey)
+			ages = append(ages, float64(f.FileBacking.DiskFileNum-oldestFileNum)/float64(newestFileNum-oldestFileNum+1))
+
+			d.adaptiveCompression.UpdateMetricsForLevel(i, startKeys, ages)
+		}
+	}
+}
+
+func (d *DB) runAdaptiveCompressionMonitor() {
+	defer d.compactionSchedulers.Done()
+
+	for {
+		select {
+		case <-d.closedCh:
+			return
+		case <-time.After(1 * time.Minute):
+			d.updateAdaptiveCompressionStats()
+		}
+	}
 }

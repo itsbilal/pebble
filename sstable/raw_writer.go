@@ -135,11 +135,13 @@ type RawWriter struct {
 	split                Split
 	formatKey            base.FormatKey
 	compression          block.Compression
+	adaptiveResolver     AdaptiveCompressionResolver
 	separator            Separator
 	successor            Successor
 	tableFormat          TableFormat
 	isStrictObsolete     bool
 	writingToLowestLevel bool
+	level                int
 	restartInterval      int
 	checksumType         block.ChecksumType
 	// disableKeyOrderChecks disables the checks that keys are added to an
@@ -843,6 +845,7 @@ func (w *RawWriter) addPoint(key InternalKey, value []byte, forceObsolete bool) 
 	if w.isStrictObsolete && key.Kind() == InternalKeyKindMerge {
 		return errors.Errorf("MERGE not supported in a strict-obsolete sstable")
 	}
+	w.maybeResolveCompression(key.UserKey)
 	var err error
 	var setHasSameKeyPrefix, writeToValueBlock, addPrefixToValueStoredWithKey bool
 	var isObsolete bool
@@ -976,7 +979,18 @@ func (w *RawWriter) prettyTombstone(k InternalKey, value []byte) fmt.Formatter {
 	}.Pretty(w.formatKey)
 }
 
+func (w *RawWriter) maybeResolveCompression(userKey []byte) {
+	if w.compression != block.AdaptiveCompression {
+		return
+	}
+	w.compression = w.adaptiveResolver.Resolve(BlockCompressionInfo{
+		Level: w.level,
+		Key:   userKey,
+	})
+}
+
 func (w *RawWriter) addTombstone(key InternalKey, value []byte) error {
+	w.maybeResolveCompression(key.UserKey)
 	if !w.disableKeyOrderChecks && w.rangeDelBlock.EntryCount() > 0 {
 		// Check that tombstones are being added in fragmented order. If the two
 		// tombstones overlap, their start and end keys must be identical.
@@ -1062,6 +1076,7 @@ func (w *RawWriter) encodeFragmentedRangeKeySpan(span keyspan.Span) {
 // overlap. Range keys may be added out of order relative to point keys and
 // range deletions.
 func (w *RawWriter) addRangeKey(key InternalKey, value []byte) error {
+	w.maybeResolveCompression(key.UserKey)
 	if !w.disableKeyOrderChecks && w.rangeKeyBlock.EntryCount() > 0 {
 		prevStartKey := w.rangeKeyBlock.CurKey()
 		prevEndKey, _, err := rangekey.DecodeEndKey(prevStartKey.Kind(), w.rangeKeyBlock.CurValue())
@@ -1172,6 +1187,7 @@ func (w *RawWriter) flush(key InternalKey) error {
 	}
 	w.dataBlockBuf.finish()
 	w.maybeIncrementTombstoneDenseBlocks()
+	w.maybeResolveCompression(key.UserKey)
 	w.dataBlockBuf.compressAndChecksum(w.compression)
 	// Since dataBlockEstimates.addInflightDataBlock was never called, the
 	// inflightSize is set to 0.
@@ -1896,10 +1912,11 @@ func (w *RawWriter) Metadata() (*WriterMetadata, error) {
 	return &w.meta, nil
 }
 
-// NewRawWriter returns a new table writer for the file. Closing the writer will
-// close the file.
-func NewRawWriter(writable objstorage.Writable, o WriterOptions) *RawWriter {
+func NewRawWriterWithCompressionResolver(writable objstorage.Writable, o WriterOptions, resolver AdaptiveCompressionResolver) *RawWriter {
 	o = o.ensureDefaults()
+	if resolver == nil {
+		resolver = SimpleAdaptiveCompressionResolver
+	}
 	w := &RawWriter{
 		layout: makeLayoutWriter(writable, o),
 		meta: WriterMetadata{
@@ -1925,6 +1942,8 @@ func NewRawWriter(writable objstorage.Writable, o WriterOptions) *RawWriter {
 		tableFormat:                o.TableFormat,
 		isStrictObsolete:           o.IsStrictObsolete,
 		writingToLowestLevel:       o.WritingToLowestLevel,
+		level:                      o.Level,
+		adaptiveResolver:           resolver,
 		restartInterval:            o.BlockRestartInterval,
 		checksumType:               o.Checksum,
 		disableKeyOrderChecks:      o.internal.DisableKeyOrderChecks,
@@ -2014,6 +2033,12 @@ func NewRawWriter(writable objstorage.Writable, o WriterOptions) *RawWriter {
 	// Initialize the range key fragmenter and encoder.
 	w.rangeKeyEncoder.Emit = w.addRangeKey
 	return w
+}
+
+// NewRawWriter returns a new table writer for the file. Closing the writer will
+// close the file.
+func NewRawWriter(writable objstorage.Writable, o WriterOptions) *RawWriter {
+	return NewRawWriterWithCompressionResolver(writable, o, SimpleAdaptiveCompressionResolver)
 }
 
 // SetSnapshotPinnedProperties sets the properties for pinned keys. Should only

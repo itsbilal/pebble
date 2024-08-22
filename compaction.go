@@ -2740,7 +2740,7 @@ func (d *DB) newCompactionOutput(
 		d.opts.Experimental.MaxWriterConcurrency > 0 &&
 			(cpuWorkHandle.Permitted() || d.opts.Experimental.ForceWriterParallelism)
 
-	tw := sstable.NewRawWriter(writable, writerOpts)
+	tw := sstable.NewRawWriterWithCompressionResolver(writable, writerOpts, d.adaptiveCompression)
 	return objMeta, tw, cpuWorkHandle, nil
 }
 

@@ -268,6 +268,15 @@ func Open(dirname string, opts *Options) (db *DB, err error) {
 		apply:         d.commitApply,
 		write:         d.commitWrite,
 	})
+	for i := range d.opts.Levels {
+		if d.opts.Levels[i].Compression != nil {
+			c := resolveDefaultCompression(d.opts.Levels[i].Compression())
+			if c == AdaptiveCompression {
+				d.adaptiveCompression = &sstable.StatefulAdaptiveCompressionResolver{Cmp: opts.Comparer.Compare}
+				break
+			}
+		}
+	}
 	d.mu.nextJobID = 1
 	d.mu.mem.nextSize = opts.MemTableSize
 	if d.mu.mem.nextSize > initialMemTableSize {
@@ -624,6 +633,11 @@ func Open(dirname string, opts *Options) (db *DB, err error) {
 			os.Exit(1)
 		}
 	})
+
+	if d.adaptiveCompression != nil {
+		d.compactionSchedulers.Add(1)
+		go d.runAdaptiveCompressionMonitor()
+	}
 
 	return d, nil
 }

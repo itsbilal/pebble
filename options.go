@@ -40,11 +40,12 @@ type Compression = block.Compression
 
 // Exported Compression constants.
 const (
-	DefaultCompression = block.DefaultCompression
-	NoCompression      = block.NoCompression
-	SnappyCompression  = block.SnappyCompression
-	ZstdCompression    = block.ZstdCompression
-	S2Compression      = block.S2Compression
+	DefaultCompression  = block.DefaultCompression
+	NoCompression       = block.NoCompression
+	SnappyCompression   = block.SnappyCompression
+	ZstdCompression     = block.ZstdCompression
+	S2Compression       = block.S2Compression
+	AdaptiveCompression = block.AdaptiveCompression
 )
 
 // FilterType exports the base.FilterType type.
@@ -2031,6 +2032,7 @@ func (o *Options) MakeWriterOptions(level int, format sstable.TableFormat) sstab
 			writerOpts.WritingToLowestLevel = true
 		}
 	}
+	writerOpts.Level = level
 	levelOpts := o.Level(level)
 	writerOpts.BlockRestartInterval = levelOpts.BlockRestartInterval
 	writerOpts.BlockSize = levelOpts.BlockSize
