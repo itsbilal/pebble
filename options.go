@@ -1316,7 +1316,7 @@ func (o *Options) EnsureDefaults() *Options {
 		o.Experimental.CPUWorkPermissionGranter = defaultCPUWorkGranter{}
 	}
 	if o.Experimental.MultiLevelCompactionHeuristic == nil {
-		o.Experimental.MultiLevelCompactionHeuristic = WriteAmpHeuristic{}
+		o.Experimental.MultiLevelCompactionHeuristic = WriteAmpAndLevelScoreHeuristic{}
 	}
 
 	o.initMaps()
@@ -1710,6 +1710,8 @@ func (o *Options) Parse(s string, hooks *ParseHooks) error {
 				switch {
 				case value == "none":
 					o.Experimental.MultiLevelCompactionHeuristic = NoMultiLevel{}
+				case strings.HasPrefix(value, "wamp_and_level_score"):
+					o.Experimental.MultiLevelCompactionHeuristic = WriteAmpAndLevelScoreHeuristic{}
 				case strings.HasPrefix(value, "wamp"):
 					fields := strings.FieldsFunc(strings.TrimPrefix(value, "wamp"), func(r rune) bool {
 						return unicode.IsSpace(r) || r == ',' || r == '(' || r == ')'

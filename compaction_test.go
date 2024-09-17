@@ -88,9 +88,9 @@ func (p *compactionPickerForTesting) pickAuto(env compactionEnv) (pc *pickedComp
 		file:        iter.Take(),
 	}
 	if cInfo.level == 0 {
-		return pickL0(env, p.opts, p.vers, p.baseLevel)
+		return pickL0(env, p.opts, p.vers, p.baseLevel, p)
 	}
-	return pickAutoLPositive(env, p.opts, p.vers, cInfo, p.baseLevel)
+	return pickAutoLPositive(env, p.opts, p.vers, cInfo, p.baseLevel, p)
 }
 
 func (p *compactionPickerForTesting) pickElisionOnlyCompaction(
@@ -394,8 +394,8 @@ func TestPickCompaction(t *testing.T) {
 				level:     1,
 				baseLevel: 1,
 			},
-			want:      "200,210,220 300  ",
-			wantMulti: true,
+			want:      "200,210,220 300 ",
+			wantMulti: false,
 		},
 
 		{
@@ -447,8 +447,8 @@ func TestPickCompaction(t *testing.T) {
 				level:     1,
 				baseLevel: 1,
 			},
-			want:      "200 300  ",
-			wantMulti: true,
+			want:      "200 300 ",
+			wantMulti: false,
 		},
 
 		{

@@ -389,21 +389,19 @@ L3:
 
 compact a-zz L1
 ----
-L2:
-  000007:[a#201,SET-j#210,SET]
-  000008:[k#211,SET-o#215,SET]
-  000009:[z#102,SET-z#102,SET]
 L3:
-  000006:[m#1,SET-m#1,SET]
+  000007:[a#0,SET-e#0,SET]
+  000008:[f#0,SET-j#0,SET]
+  000009:[k#0,SET-o#0,SET]
+  000010:[z#0,SET-z#0,SET]
 
 file-sizes
 ----
-L2:
-  000007:[a#201,SET-j#210,SET]: 10777 bytes (10KB)
-  000008:[k#211,SET-o#215,SET]: 5684 bytes (5.6KB)
-  000009:[z#102,SET-z#102,SET]: 600 bytes (600B)
 L3:
-  000006:[m#1,SET-m#1,SET]: 10595 bytes (10KB)
+  000007:[a#0,SET-e#0,SET]: 5684 bytes (5.6KB)
+  000008:[f#0,SET-j#0,SET]: 5684 bytes (5.6KB)
+  000009:[k#0,SET-o#0,SET]: 5684 bytes (5.6KB)
+  000010:[z#0,SET-z#0,SET]: 600 bytes (600B)
 
 # Test the file-size splitter's adaptive tolerance for early-splitting at a
 # grandparent boundary. The L1->L2 compaction has many opportunities to split at
@@ -479,42 +477,18 @@ L3:
 
 compact a-zz L1
 ----
-L2:
-  000019:[a#201,SET-e#205,SET]
-  000020:[f#206,SET-l#212,SET]
-  000021:[m#213,SET-z#102,SET]
 L3:
-  000006:[a#1,SET-a#1,SET]
-  000007:[ab#2,SET-ab#2,SET]
-  000008:[ac#3,SET-ac#3,SET]
-  000009:[ad#4,SET-ad#4,SET]
-  000010:[ae#5,SET-ae#5,SET]
-  000011:[af#6,SET-af#6,SET]
-  000012:[ag#7,SET-ag#7,SET]
-  000013:[ah#8,SET-ah#8,SET]
-  000014:[c#9,SET-c#9,SET]
-  000015:[d#10,SET-d#10,SET]
-  000016:[e#11,SET-e#11,SET]
-  000017:[f#12,SET-f#12,SET]
-  000018:[m#13,SET-m#13,SET]
+  000019:[a#0,SET-ae#0,SET]
+  000020:[af#0,SET-c#0,SET]
+  000021:[d#0,SET-h#0,SET]
+  000022:[i#0,SET-m#0,SET]
+  000023:[n#0,SET-z#0,SET]
 
 file-sizes
 ----
-L2:
-  000019:[a#201,SET-e#205,SET]: 5684 bytes (5.6KB)
-  000020:[f#206,SET-l#212,SET]: 7712 bytes (7.5KB)
-  000021:[m#213,SET-z#102,SET]: 3646 bytes (3.6KB)
 L3:
-  000006:[a#1,SET-a#1,SET]: 1595 bytes (1.6KB)
-  000007:[ab#2,SET-ab#2,SET]: 1596 bytes (1.6KB)
-  000008:[ac#3,SET-ac#3,SET]: 1596 bytes (1.6KB)
-  000009:[ad#4,SET-ad#4,SET]: 1596 bytes (1.6KB)
-  000010:[ae#5,SET-ae#5,SET]: 1596 bytes (1.6KB)
-  000011:[af#6,SET-af#6,SET]: 1596 bytes (1.6KB)
-  000012:[ag#7,SET-ag#7,SET]: 1596 bytes (1.6KB)
-  000013:[ah#8,SET-ah#8,SET]: 1596 bytes (1.6KB)
-  000014:[c#9,SET-c#9,SET]: 1595 bytes (1.6KB)
-  000015:[d#10,SET-d#10,SET]: 1595 bytes (1.6KB)
-  000016:[e#11,SET-e#11,SET]: 1595 bytes (1.6KB)
-  000017:[f#12,SET-f#12,SET]: 1595 bytes (1.6KB)
-  000018:[m#13,SET-m#13,SET]: 1595 bytes (1.6KB)
+  000019:[a#0,SET-ae#0,SET]: 5686 bytes (5.6KB)
+  000020:[af#0,SET-c#0,SET]: 5685 bytes (5.6KB)
+  000021:[d#0,SET-h#0,SET]: 5684 bytes (5.6KB)
+  000022:[i#0,SET-m#0,SET]: 5684 bytes (5.6KB)
+  000023:[n#0,SET-z#0,SET]: 2632 bytes (2.6KB)

@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"fmt"
 	"math"
+	"slices"
 	"sort"
 	"strings"
 
@@ -1252,7 +1253,7 @@ func (p *compactionPickerByScore) pickAuto(env compactionEnv) (pc *pickedCompact
 		}
 
 		if info.level == 0 {
-			pc = pickL0(env, p.opts, p.vers, p.baseLevel)
+			pc = pickL0(env, p.opts, p.vers, p.baseLevel, p)
 			// Fail-safe to protect against compacting the same sstable
 			// concurrently.
 			if pc != nil && !inputRangeAlreadyCompacting(env, pc) {
@@ -1274,7 +1275,7 @@ func (p *compactionPickerByScore) pickAuto(env compactionEnv) (pc *pickedCompact
 			continue
 		}
 
-		pc := pickAutoLPositive(env, p.opts, p.vers, *info, p.baseLevel)
+		pc := pickAutoLPositive(env, p.opts, p.vers, *info, p.baseLevel, p)
 		// Fail-safe to protect against compacting the same sstable concurrently.
 		if pc != nil && !inputRangeAlreadyCompacting(env, pc) {
 			p.addScoresToPickedCompactionMetrics(pc, scores)
@@ -1558,7 +1559,12 @@ func (p *compactionPickerByScore) pickTombstoneDensityCompaction(
 // file in a positive-numbered level. This function must not be used for
 // L0.
 func pickAutoLPositive(
-	env compactionEnv, opts *Options, vers *version, cInfo candidateLevelInfo, baseLevel int,
+	env compactionEnv,
+	opts *Options,
+	vers *version,
+	cInfo candidateLevelInfo,
+	baseLevel int,
+	p compactionPicker,
 ) (pc *pickedCompaction) {
 	if cInfo.level == 0 {
 		panic("pebble: pickAutoLPositive called for L0")
@@ -1582,11 +1588,13 @@ func pickAutoLPositive(
 	if !pc.setupInputs(opts, env.diskAvailBytes, pc.startLevel) {
 		return nil
 	}
-	return pc.maybeAddLevel(opts, env.diskAvailBytes)
+	return pc.maybeAddLevel(opts, env.diskAvailBytes, p, env)
 }
 
 // maybeAddLevel maybe adds a level to the picked compaction.
-func (pc *pickedCompaction) maybeAddLevel(opts *Options, diskAvailBytes uint64) *pickedCompaction {
+func (pc *pickedCompaction) maybeAddLevel(
+	opts *Options, diskAvailBytes uint64, p compactionPicker, env compactionEnv,
+) *pickedCompaction {
 	pc.pickerMetrics.singleLevelOverlappingRatio = pc.overlappingRatio()
 	if pc.outputLevel.level == numLevels-1 {
 		// Don't add a level if the current output level is in L6
@@ -1600,13 +1608,13 @@ func (pc *pickedCompaction) maybeAddLevel(opts *Options, diskAvailBytes uint64) 
 		// Don't add a level if the current compaction exceeds the compaction size limit
 		return pc
 	}
-	return opts.Experimental.MultiLevelCompactionHeuristic.pick(pc, opts, diskAvailBytes)
+	return opts.Experimental.MultiLevelCompactionHeuristic.pick(pc, opts, diskAvailBytes, p, env)
 }
 
 // MultiLevelHeuristic evaluates whether to add files from the next level into the compaction.
 type MultiLevelHeuristic interface {
 	// Evaluate returns the preferred compaction.
-	pick(pc *pickedCompaction, opts *Options, diskAvailBytes uint64) *pickedCompaction
+	pick(pc *pickedCompaction, opts *Options, diskAvailBytes uint64, p compactionPicker, env compactionEnv) *pickedCompaction
 
 	// Returns if the heuristic allows L0 to be involved in ML compaction
 	allowL0() bool
@@ -1621,7 +1629,7 @@ type NoMultiLevel struct{}
 var _ MultiLevelHeuristic = (*NoMultiLevel)(nil)
 
 func (nml NoMultiLevel) pick(
-	pc *pickedCompaction, opts *Options, diskAvailBytes uint64,
+	pc *pickedCompaction, opts *Options, diskAvailBytes uint64, p compactionPicker, env compactionEnv,
 ) *pickedCompaction {
 	return pc
 }
@@ -1629,10 +1637,36 @@ func (nml NoMultiLevel) pick(
 func (nml NoMultiLevel) allowL0() bool  { return false }
 func (nml NoMultiLevel) String() string { return "none" }
 
+// predictedWriteAmp returns the theoretical write-amplification contribution of a
+// compaction where no keys in the higher level(s) shadow keys in the output level.
+//
+// This equals (size(all inputs)) / (size(all inputs except the lowest level)).
 func (pc *pickedCompaction) predictedWriteAmp() float64 {
 	var bytesToCompact uint64
 	var higherLevelBytes uint64
 	for i := range pc.inputs {
+		levelSize := pc.inputs[i].files.SizeSum()
+		bytesToCompact += levelSize
+		if i != len(pc.inputs)-1 {
+			higherLevelBytes += levelSize
+		}
+	}
+	return float64(bytesToCompact) / float64(higherLevelBytes)
+}
+
+// predictedShadowedWriteAmp returns the theoretical write-amplification contribution
+// of a compaction where keys in the highest level shadow keys in all middle input levels,
+// but not any keys in the lowest level. This is a more optimistic estimate of write-amplification
+// and is used to decide if multi-level compactions should be chosen.
+//
+// This equals (size(all inputs except the middle levels)) /  size (all inputs minus the lowest level)
+func (pc *pickedCompaction) predictedShadowedWriteAmp() float64 {
+	var bytesToCompact uint64
+	var higherLevelBytes uint64
+	for i := range pc.inputs {
+		if i == 0 {
+			continue
+		}
 		levelSize := pc.inputs[i].files.SizeSum()
 		bytesToCompact += levelSize
 		if i != len(pc.inputs)-1 {
@@ -1677,7 +1711,11 @@ var _ MultiLevelHeuristic = (*WriteAmpHeuristic)(nil)
 // in-progress flushes and compactions from completing, etc. Consider ways to
 // deduplicate work, given that setupInputs has already been called.
 func (wa WriteAmpHeuristic) pick(
-	pcOrig *pickedCompaction, opts *Options, diskAvailBytes uint64,
+	pcOrig *pickedCompaction,
+	opts *Options,
+	diskAvailBytes uint64,
+	p compactionPicker,
+	env compactionEnv,
 ) *pickedCompaction {
 	pcMulti := pcOrig.clone()
 	if !pcMulti.setupMultiLevelCandidate(opts, diskAvailBytes) {
@@ -1708,9 +1746,77 @@ func (wa WriteAmpHeuristic) String() string {
 	return fmt.Sprintf("wamp(%.2f, %t)", wa.AddPropensity, wa.AllowL0)
 }
 
+// WriteAmpAndLevelScoreHeuristic defines a multi level compaction heuristic which will add
+// an additional level to the picked compaction if it reduces predicted write
+// amp of the compaction, and if an equivalent single-level compaction would have
+// resulted in a level score above 1 for its output level.
+type WriteAmpAndLevelScoreHeuristic struct{}
+
+func (wa WriteAmpAndLevelScoreHeuristic) pick(
+	pcOrig *pickedCompaction,
+	opts *Options,
+	diskAvailBytes uint64,
+	p compactionPicker,
+	env compactionEnv,
+) *pickedCompaction {
+	pcMulti := pcOrig.clone()
+	if !pcMulti.setupMultiLevelCandidate(opts, diskAvailBytes) {
+		return pcOrig
+	}
+	// We consider the addition of a level as an "expansion" of the compaction.
+	// If pcMulti is past the expanded compaction byte size limit already,
+	// we don't consider it.
+	if pcMulti.compactionSize() >= expandedCompactionByteSizeLimit(
+		opts, adjustedOutputLevel(pcMulti.outputLevel.level, pcMulti.baseLevel), diskAvailBytes) {
+		return pcOrig
+	}
+	picked := pcOrig
+	// This is a little tricky. It's easier to reason about the write-amp of a multi-level compaction as
+	// being roughly equivalent to that of two single-level compactions, where the second single-level compaction
+	// starts off with the output of the first compaction. However this always means the write-amp of the multi-level
+	// will be lower (as it has one less step), so we artificially bias the single-level side by assuming that
+	// the second compaction only has the input size of the first compaction (i.e. bytes in the output level
+	// of the first compaction all got deleted). This is how predictedShadowedWriteAmp is calculated, so we
+	// add that on the single-level side of this equation.
+	pickMulti := pcMulti.predictedWriteAmp() <= (pcOrig.predictedWriteAmp() + pcMulti.predictedShadowedWriteAmp())
+	// Pick a multi-level compaction only if pcMulti is true, _and_ running the original compaction would
+	// have resulted in a level score of >1 for its output level.
+
+	if p != nil {
+		// We add pcOrig to inProgressCompactions so that the produced score accounts
+		// for that compaction being near-finished.
+		inProgressCompactions := slices.Clone(env.inProgressCompactions)
+		inProgressCompactions = append(inProgressCompactions, compactionInfo{
+			inputs:      pcOrig.inputs,
+			outputLevel: pcOrig.outputLevel.level,
+			smallest:    pcOrig.smallest,
+			largest:     pcOrig.largest,
+		})
+		scores := p.getScores(inProgressCompactions)
+		pickMulti = pickMulti && scores[pcOrig.outputLevel.level] > 1
+	}
+	if pickMulti {
+		picked = pcMulti
+	}
+	// Regardless of what compaction was picked, log the multilevelOverlapping ratio.
+	picked.pickerMetrics.multiLevelOverlappingRatio = pcMulti.overlappingRatio()
+	return picked
+}
+
+func (wa WriteAmpAndLevelScoreHeuristic) allowL0() bool {
+	return false
+}
+
+// String implements fmt.Stringer.
+func (wa WriteAmpAndLevelScoreHeuristic) String() string {
+	return "wamp_and_level_score()"
+}
+
 // Helper method to pick compactions originating from L0. Uses information about
 // sublevels to generate a compaction.
-func pickL0(env compactionEnv, opts *Options, vers *version, baseLevel int) (pc *pickedCompaction) {
+func pickL0(
+	env compactionEnv, opts *Options, vers *version, baseLevel int, p compactionPicker,
+) (pc *pickedCompaction) {
 	// It is important to pass information about Lbase files to L0Sublevels
 	// so it can pick a compaction that does not conflict with an Lbase => Lbase+1
 	// compaction. Without this, we observed reduced concurrency of L0=>Lbase
@@ -1729,7 +1835,7 @@ func pickL0(env compactionEnv, opts *Options, vers *version, baseLevel int) (pc 
 		if pc.startLevel.files.Empty() {
 			opts.Logger.Fatalf("empty compaction chosen")
 		}
-		return pc.maybeAddLevel(opts, env.diskAvailBytes)
+		return pc.maybeAddLevel(opts, env.diskAvailBytes, p, env)
 	}
 
 	// Couldn't choose a base compaction. Try choosing an intra-L0
@@ -1797,7 +1903,7 @@ func pickManualCompaction(
 		// concurrent compaction.
 		return nil, true
 	}
-	if pc = pc.maybeAddLevel(opts, env.diskAvailBytes); pc == nil {
+	if pc = pc.maybeAddLevel(opts, env.diskAvailBytes, nil, env); pc == nil {
 		return nil, false
 	}
 	if pc.outputLevel.level != outputLevel {

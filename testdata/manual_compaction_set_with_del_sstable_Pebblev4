@@ -573,11 +573,9 @@ L3:
 
 compact a-f L1
 ----
-L2:
-  000006:[a#3,SET-c#inf,RANGEDEL]
-  000007:[c#3,RANGEDEL-e#inf,RANGEDEL]
 L3:
-  000005:[c#2,RANGEDEL-d#inf,RANGEDEL]
+  000006:[a#3,SET-d#inf,RANGEDEL]
+  000007:[d#3,RANGEDEL-e#inf,RANGEDEL]
 
 
 # Test a scenario where we the last point key in an sstable has a

@@ -71,10 +71,8 @@ L4:
 
 compact a-b L1
 ----
-L2:
-  000004:[a#3,SET-b#2,SET]
 L3:
-  000005:[a#2,SET-c#4,SET]
+  000007:[a#3,SET-c#4,SET]
 L4:
   000006:[c#2,SET-d#1,SET]
 
@@ -92,7 +90,7 @@ L4:
 
 compact a-b L1
 ----
-L3:
+L2:
   000004:[a#3,SET-b#2,SET]
 L4:
   000005:[c#2,SET-d#1,SET]

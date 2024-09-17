@@ -304,9 +304,20 @@ base: 4
 
 queue
 ----
-L4->L5: 1.8
+L4->L6: 1.8
   400001:[0001#1,SET-0001#1,SET] marked as compacting
   500001:[0001#1,SET-0001#1,SET] marked as compacting
+  500002:[0002#2,SET-0002#2,SET] marked as compacting
+  500003:[0003#3,SET-0003#3,SET] marked as compacting
+  500004:[0004#4,SET-0004#4,SET] marked as compacting
+  500005:[0005#5,SET-0005#5,SET] marked as compacting
+  500006:[0006#6,SET-0006#6,SET] marked as compacting
+  500007:[0007#7,SET-0007#7,SET] marked as compacting
+  500008:[0008#8,SET-0008#8,SET] marked as compacting
+  500009:[0009#9,SET-0009#9,SET] marked as compacting
+  500010:[0010#10,SET-0010#10,SET] marked as compacting
+  500011:[0011#11,SET-0011#11,SET] marked as compacting
+  600001:[0001#1,SET-0100#1,SET] marked as compacting
 
 init 1
 0: 4
@@ -491,10 +502,12 @@ base: 4
 
 queue
 ----
-L4->L5: 10.0
+L4->L6: 10.0
   400007:[0007#7,SET-0007#7,SET] marked as compacting
-L4->L5: 7.7
+  600007:[0007#7,SET-0007#7,SET] marked as compacting
+L4->L6: 9.0
   400008:[0008#8,SET-0008#8,SET] marked as compacting
+  600008:[0008#8,SET-0008#8,SET] marked as compacting
 
 pick ongoing=(5,6)
 ----
