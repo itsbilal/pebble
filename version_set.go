@@ -957,15 +957,11 @@ func (vs *versionSet) markFileNumUsed(fileNum base.DiskFileNum) {
 	}
 }
 
-// getNextFileNum returns the next file number to be used.
-//
-// Can be called without the versionSet's mutex being held.
 func (vs *versionSet) getNextFileNum() base.FileNum {
 	x := vs.nextFileNum.Add(1) - 1
 	return base.FileNum(x)
 }
 
-// Can be called without the versionSet's mutex being held.
 func (vs *versionSet) getNextDiskFileNum() base.DiskFileNum {
 	x := vs.nextFileNum.Add(1) - 1
 	return base.DiskFileNum(x)
